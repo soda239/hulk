@@ -7,10 +7,11 @@ use crate::{
     behavior_tree::Node,
     condition,
     conditions::{
-        has_ball_position, hulks_is_kicking_team, is_ball_free, is_ball_interception_candidate,
-        is_close_to_ball, is_closest_to_ball, is_controller_connected, is_fallen, is_goalkeeper,
-        is_kickoff, is_last_hulk_standing, is_primary_state, is_ready_for_stand_up,
-        is_remote_control_enabled, is_remote_kick_mode, is_simple, should_do_fall_protection,
+        has_ball_position, hulks_is_kicking_team, is_active_replacement_goalkeeper, is_ball_free,
+        is_ball_interception_candidate, is_close_to_ball, is_closest_to_ball,
+        is_controller_connected, is_fallen, is_goalkeeper, is_kickoff, is_last_hulk_standing,
+        is_primary_state, is_ready_for_stand_up, is_remote_control_enabled, is_remote_kick_mode,
+        is_simple, should_do_fall_protection,
     },
     goalkeeper::goalkeeper_subtree,
     head::{look_around, look_at_ball_subtree, look_straight_ahead, search_for_lost_ball_subtree},
@@ -18,6 +19,10 @@ use crate::{
     negation,
     node::Blackboard,
     penalty_shootout::{is_penalty_shootout, penalty_shootout_subtree},
+    replacement_goalkeeper::{
+        refresh_replacement_goalkeeper_election_status, refresh_replacement_goalkeeper_role,
+        update_replacement_goalkeeper_election,
+    },
     search::{leuchtturm, walk_towards_search_position},
     selection, sequence,
     substates::{is_in_sub_state, is_sub_state, sub_state_subtree},
@@ -31,7 +36,7 @@ use crate::{
 };
 
 pub fn create_tree() -> Node<Blackboard> {
-    selection!(
+    let behavior = selection!(
         sequence!(
             condition!(is_primary_state, PrimaryState::Damping),
             action!(damping)
@@ -57,7 +62,7 @@ pub fn create_tree() -> Node<Blackboard> {
         ),
         sequence!(
             selection!(
-                condition!(is_primary_state, PrimaryState::Finished),
+                condition!(is_primary_state, PrimaryState::Finished), // Why Finished again?!
                 condition!(is_primary_state, PrimaryState::Penalized),
             ),
             action!(stand)
@@ -82,6 +87,11 @@ pub fn create_tree() -> Node<Blackboard> {
             subtree!(playing_subtree)
         ),
         Node::Failure
+    );
+
+    sequence!(
+        action!(refresh_replacement_goalkeeper_role), // to refresh coordinator every loop
+        behavior,
     )
 }
 
@@ -114,8 +124,15 @@ fn playing_subtree() -> Node<Blackboard> {
         ),
         sequence!(condition!(is_goalkeeper), subtree!(goalkeeper_subtree)),
         sequence!(
+            condition!(is_active_replacement_goalkeeper),
+            subtree!(goalkeeper_subtree)
+        ),
+        sequence!(
             negation!(condition!(has_ball_position)),
-            subtree!(search_subtree)
+            selection!(
+                subtree!(replacement_goalkeeper_decision_subtree),
+                subtree!(search_subtree)
+            ),
         ),
         sequence!(
             selection!(
@@ -128,8 +145,10 @@ fn playing_subtree() -> Node<Blackboard> {
                 action!(calculate_voronoi_grid),
             ),
             condition!(is_closest_to_ball),
+            action!(update_replacement_goalkeeper_election, false),
             subtree!(striker_subtree),
         ),
+        subtree!(replacement_goalkeeper_decision_subtree),
         subtree!(supporter_subtree),
     )
 }
@@ -197,5 +216,14 @@ fn remote_kick_subtree(button: Button, strong: bool) -> Node<Blackboard> {
         action!(kick),
         action!(set_kick_target_beyond_ball),
         action!(use_kick, strong),
+    )
+}
+
+fn replacement_goalkeeper_decision_subtree() -> Node<Blackboard> {
+    sequence!(
+        condition!(refresh_replacement_goalkeeper_election_status),
+        action!(update_replacement_goalkeeper_election, true),
+        condition!(is_active_replacement_goalkeeper),
+        subtree!(goalkeeper_subtree),
     )
 }
