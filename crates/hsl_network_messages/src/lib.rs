@@ -42,6 +42,7 @@ pub struct StateMessage {
     pub player_number: PlayerNumber,
     pub pose: Pose2<Field>,
     pub ball_position: Option<BallPosition<Field>>,
+    pub replacement_goalkeeper_claim: bool,
 }
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, Message)]
@@ -102,6 +103,7 @@ mod tests {
                 position: Point2::origin(),
                 age: Duration::MAX,
             }),
+            replacement_goalkeeper_claim: true
         });
         assert!(bincode::serialize(&test_message).unwrap().len() <= 128)
     }

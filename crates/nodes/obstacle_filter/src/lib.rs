@@ -726,6 +726,7 @@ mod tests {
         let player_state = PlayerState {
             pose: linear_algebra::point![3.0, 5.0].into(),
             ball_position: None,
+            replacement_goalkeeper_claim: false,
         };
 
         let position = measured_player_position(&player_state, &ground_to_field);
@@ -740,10 +741,12 @@ mod tests {
         let own_player_state = PlayerState {
             pose: linear_algebra::point![1.0, 2.0].into(),
             ball_position: None,
+            replacement_goalkeeper_claim: false,
         };
         let teammate_state = PlayerState {
             pose: linear_algebra::point![3.0, 4.0].into(),
             ball_position: None,
+            replacement_goalkeeper_claim: false,
         };
         let players = Players {
             two: Some(TimeWrapper {
@@ -786,6 +789,7 @@ mod tests {
         let newer_teammate_state = PlayerState {
             pose: linear_algebra::point![5.0, 6.0].into(),
             ball_position: None,
+            replacement_goalkeeper_claim: false,
         };
         let updated_players = Players {
             four: Some(TimeWrapper {

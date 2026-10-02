@@ -101,6 +101,7 @@ impl Blackboard {
                 player_number: self.world_state.robot.player_number,
                 pose,
                 ball_position,
+                replacement_goalkeeper_claim: false, // TODO only false for now
             });
 
             self.last_sent_hsl_message_time = Some(now);

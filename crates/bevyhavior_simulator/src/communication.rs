@@ -113,6 +113,7 @@ pub fn apply_incoming_hsl_messages(
                     ros_z::time::Time::from_wallclock(incoming_message.received_at),
                 )
             }),
+            replacement_goalkeeper_claim: state_message.replacement_goalkeeper_claim,
         };
         received_hsl_messages
             .player_states_by_receiver
@@ -215,6 +216,7 @@ mod tests {
                 age: Duration::from_millis(500),
                 position: point![x + 1.0, y],
             }),
+            replacement_goalkeeper_claim: false,
         })
     }
 

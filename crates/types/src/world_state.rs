@@ -104,4 +104,5 @@ pub struct RobotState {
 pub struct PlayerState {
     pub pose: Pose2<Field>,
     pub ball_position: Option<BallPosition<Field>>,
+    pub replacement_goalkeeper_claim: bool,
 }

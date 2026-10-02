@@ -87,6 +87,7 @@ fn apply_message(
             ball_position: state_message
                 .ball_position
                 .map(|ball| BallPosition::from_network_ball(ball, time)),
+            replacement_goalkeeper_claim: state_message.replacement_goalkeeper_claim,
         },
     });
 }
@@ -151,6 +152,7 @@ mod tests {
                     player_number: PlayerNumber::Two,
                     pose,
                     ball_position: None,
+                    replacement_goalkeeper_claim: false,
                 })),
             },
         );
