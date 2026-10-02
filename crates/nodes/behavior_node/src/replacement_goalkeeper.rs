@@ -1,15 +1,14 @@
 // coordinator for decentralized replacement goalkeeper election
-// hier sind nur die Funktionen drin, die an anderer Stelle aufgerufen werden
 
-use ros_z::time::Time;
 use hsl_network_messages::PlayerNumber;
+use ros_z::time::Time;
 
 pub struct ReplacementGoalkeeperInput {
     pub regular_goalkeeper_is_penalized: bool,
     pub is_playing: bool,
     pub is_eligible_candidate: bool, // temporary input until time-API understood
     pub own_player_number: PlayerNumber,
-    pub lowest_claiming_player: Option<PlayerNumber>,
+    pub lowest_claiming_player: Option<PlayerNumber>, // ToDo INCLUDING own_player_number ???
     pub election_window_elapsed: bool,
     pub now: Time,
 }
@@ -43,7 +42,7 @@ impl ReplacementGoalkeeperCoordinator {
             self.reset();
             return;
         }
-        
+
         match self.state {
             ReplacementGoalkeeperState::Inactive => {
                 if input.is_eligible_candidate {
@@ -54,17 +53,26 @@ impl ReplacementGoalkeeperCoordinator {
             ReplacementGoalkeeperState::Candidate => {
                 if !input.is_eligible_candidate {
                     self.reset();
+                } else {
+            // Candidate -> Active
+                    match (input.election_window_elapsed, input.lowest_claiming_player, input.own_player_number) {
+                        (false, _, _) => {}
+                        (true, None, _) => {self.state = ReplacementGoalkeeperState::Active;}
+                        (true, Some(player_number), own_player_number) => {
+                            if own_player_number as i8 <= player_number as i8 {
+                                self.state = ReplacementGoalkeeperState::Active;
+                            }
+                        }
+                    }  
                 }
             }
             ReplacementGoalkeeperState::Active => {}
         }
 
-        // Is there already an avtive claim?
-        // Am I a suitable Candidate?
-        // Candidate -> Active ?
-        // Fallback?    
+        // Is there already an active claim?
 
-    } 
+        // Fallback?
+    }
 
     pub fn is_active(&self) -> bool {
         matches!(self.state, ReplacementGoalkeeperState::Active)
@@ -77,7 +85,7 @@ impl ReplacementGoalkeeperCoordinator {
 
     pub fn claims_role(&self) -> bool {
         matches!(
-            self.state, 
+            self.state,
             ReplacementGoalkeeperState::Candidate | ReplacementGoalkeeperState::Active
         )
     }
@@ -85,13 +93,12 @@ impl ReplacementGoalkeeperCoordinator {
 
 impl Default for ReplacementGoalkeeperCoordinator {
     fn default() -> Self {
-        Self { 
+        Self {
             state: ReplacementGoalkeeperState::Inactive,
-            election_started_at: None 
-            }
+            election_started_at: None,
+        }
     }
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -103,8 +110,16 @@ mod tests {
             state: ReplacementGoalkeeperState::Active,
             election_started_at: None,
         };
-        
-        coordinator.update(false, true, true, Time::zero());
+
+        coordinator.update(ReplacementGoalkeeperInput {
+            regular_goalkeeper_is_penalized: false,
+            is_playing: true,
+            is_eligible_candidate: true,
+            own_player_number: PlayerNumber::Three,
+            lowest_claiming_player: None,
+            election_window_elapsed: true,
+            now: Time::zero(),
+        });
 
         assert!(!coordinator.is_active());
         assert!(!coordinator.claims_role());
@@ -117,7 +132,15 @@ mod tests {
             election_started_at: None,
         };
 
-        coordinator.update(true, false, true, Time::zero());
+        coordinator.update(ReplacementGoalkeeperInput {
+            regular_goalkeeper_is_penalized: true,
+            is_playing: false,
+            is_eligible_candidate: true,
+            own_player_number: PlayerNumber::Three,
+            lowest_claiming_player: None,
+            election_window_elapsed: true,
+            now: Time::zero(),
+        });
 
         assert!(!coordinator.is_active());
         assert!(!coordinator.claims_role());
@@ -130,7 +153,15 @@ mod tests {
             election_started_at: None,
         };
 
-        coordinator.update(true, true, true, Time::zero());
+        coordinator.update(ReplacementGoalkeeperInput {
+            regular_goalkeeper_is_penalized: true,
+            is_playing: true,
+            is_eligible_candidate: true,
+            own_player_number: PlayerNumber::Three,
+            lowest_claiming_player: None,
+            election_window_elapsed: false,
+            now: Time::zero(),
+        });
 
         assert!(coordinator.is_active());
         assert!(coordinator.claims_role());
@@ -140,7 +171,15 @@ mod tests {
     fn becomes_candidate_when_eligible() {
         let mut coordinator = ReplacementGoalkeeperCoordinator::default();
 
-        coordinator.update(true, true, true, Time::zero());
+        coordinator.update(ReplacementGoalkeeperInput {
+            regular_goalkeeper_is_penalized: true,
+            is_playing: true,
+            is_eligible_candidate: true,
+            own_player_number: PlayerNumber::Three,
+            lowest_claiming_player: None,
+            election_window_elapsed: true,
+            now: Time::zero(),
+        });
 
         assert!(!coordinator.is_active());
         assert!(coordinator.claims_role());
@@ -150,7 +189,15 @@ mod tests {
     fn stays_inactive_when_not_eligible() {
         let mut coordinator = ReplacementGoalkeeperCoordinator::default();
 
-        coordinator.update(true, true, false, Time::zero());
+        coordinator.update(ReplacementGoalkeeperInput {
+            regular_goalkeeper_is_penalized: true,
+            is_playing: true,
+            is_eligible_candidate: false,
+            own_player_number: PlayerNumber::Three,
+            lowest_claiming_player: None,
+            election_window_elapsed: true,
+            now: Time::zero(),
+        });
 
         assert!(!coordinator.is_active());
         assert!(!coordinator.claims_role());
@@ -162,7 +209,16 @@ mod tests {
             state: ReplacementGoalkeeperState::Candidate,
             election_started_at: None,
         };
-        coordinator.update(true, true, false, Time::zero());
+
+        coordinator.update(ReplacementGoalkeeperInput {
+            regular_goalkeeper_is_penalized: true,
+            is_playing: true,
+            is_eligible_candidate: false,
+            own_player_number: PlayerNumber::Three,
+            lowest_claiming_player: None,
+            election_window_elapsed: true,
+            now: Time::zero(),
+        });
 
         assert!(!coordinator.is_active());
         assert!(!coordinator.claims_role());
@@ -174,7 +230,16 @@ mod tests {
             state: ReplacementGoalkeeperState::Active,
             election_started_at: None,
         };
-        coordinator.update(true, true, false, Time::zero());
+
+        coordinator.update(ReplacementGoalkeeperInput {
+            regular_goalkeeper_is_penalized: true,
+            is_playing: true,
+            is_eligible_candidate: false,
+            own_player_number: PlayerNumber::Three,
+            lowest_claiming_player: None,
+            election_window_elapsed: true,
+            now: Time::zero(),
+        });
 
         assert!(coordinator.is_active());
         assert!(coordinator.claims_role());
@@ -185,7 +250,15 @@ mod tests {
         let mut coordinator = ReplacementGoalkeeperCoordinator::default();
         let now = Time::zero();
 
-        coordinator.update(true, true, true, now);
+        coordinator.update(ReplacementGoalkeeperInput {
+            regular_goalkeeper_is_penalized: true,
+            is_playing: true,
+            is_eligible_candidate: true,
+            own_player_number: PlayerNumber::Three,
+            lowest_claiming_player: None,
+            election_window_elapsed: true,
+            now: now,
+        });
 
         assert!(coordinator.claims_role());
         assert_eq!(coordinator.election_started_at, Some(now));
@@ -203,5 +276,4 @@ mod tests {
         coordinator.update(true, true, true, later_time);
     }
     */
-
 }

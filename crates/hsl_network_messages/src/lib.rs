@@ -103,7 +103,7 @@ mod tests {
                 position: Point2::origin(),
                 age: Duration::MAX,
             }),
-            replacement_goalkeeper_claim: true
+            replacement_goalkeeper_claim: true,
         });
         assert!(bincode::serialize(&test_message).unwrap().len() <= 128)
     }
