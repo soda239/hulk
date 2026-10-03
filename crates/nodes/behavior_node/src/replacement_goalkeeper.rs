@@ -1,20 +1,34 @@
 // coordinator for decentralized replacement goalkeeper election
 
-use hsl_network_messages::PlayerNumber;
+use std::time::Duration;
+use hsl_network_messages::{Player, PlayerNumber};
 use ros_z::time::Time;
+
+use types::{players::Players, primary_state::PrimaryState,};
 
 pub struct ReplacementGoalkeeperInput {
     pub regular_goalkeeper_is_penalized: bool,
-    pub is_playing: bool,
-    pub is_eligible_candidate: bool, // temporary input until time-API understood
+    pub primary_state: PrimaryState,
     pub own_player_number: PlayerNumber,
-    pub lowest_claiming_player: Option<PlayerNumber>, // ToDo INCLUDING own_player_number ???
-    pub election_window_elapsed: bool,
+
+    pub available_field_players: Players<bool>, // Players on field. Info gathered via StateMessages?
+    pub is_eligible_candidate: bool, // Ich bin verfügbar, meine Pose ist bekannt, ich bin nicht ballzuständig
+    pub should_claim_first: bool, // unter allen verfügbaren Robotern mit gültiger Pose bin ich der Tornächste. Deren Ballzuständigkeit kenne ich nicht.
+    
+    pub lowest_other_claiming_player: Option<PlayerNumber>, // current lowest *other* claim received via StateMessage
+    
     pub now: Time,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ReplacementGoalkeeperParameters { // move to parameters 
+    pub election_window: Duration,
+    pub no_claim_timeout: Duration,
+    pub backoff_step: Duration,
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 enum ReplacementGoalkeeperState {
+    #[default]
     Inactive,
     Candidate,
     Active,
@@ -23,56 +37,222 @@ enum ReplacementGoalkeeperState {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct ReplacementGoalkeeperCoordinator {
     state: ReplacementGoalkeeperState,
+    known_replacement_goalkeeper: Option<PlayerNumber>,
     election_started_at: Option<Time>,
+    replacement_needed_since: Option<Time>, // Time since when replacement keeper needed in playing
 }
 
 impl ReplacementGoalkeeperCoordinator {
-    fn reset(&mut self) {
+    fn clear_election(&mut self) {
         self.state = ReplacementGoalkeeperState::Inactive;
         self.election_started_at = None;
+        self.replacement_needed_since = None;
+    }
+    
+    fn reset(&mut self) {
+        self.clear_election();
+        self.known_replacement_goalkeeper = None;
     }
 
-    pub fn update(&mut self, input: ReplacementGoalkeeperInput) {
-        if !input.regular_goalkeeper_is_penalized {
+    fn remember_winner(
+    &mut self,
+    winner: PlayerNumber,
+    own_number: PlayerNumber,
+) {
+    self.clear_election();
+    self.known_replacement_goalkeeper = Some(winner);
+
+    if winner == own_number {
+        self.state = ReplacementGoalkeeperState::Active;
+    }
+}
+
+    // fn is_eligible_candidate an dieser Stelle einfügen?
+    // Zeitmessung und election window handling an dieser einfügen?
+
+    pub fn update(
+        &mut self, 
+        input: ReplacementGoalkeeperInput,
+        parameters: &ReplacementGoalkeeperParameters,
+    ) {
+        let own_number = input.own_player_number;
+        let available_count = input
+            .available_field_players
+            .iter()
+            .filter(|(number, available)| {
+                *number != PlayerNumber::One && **available 
+            })
+            .count();
+
+
+        if !input.regular_goalkeeper_is_penalized || available_count <= 1 {
             self.reset();
             return;
         }
 
-        if !input.is_playing {
-            self.reset();
+        let own_is_available =
+            own_number != PlayerNumber::One
+            && input.available_field_players[own_number]
+            && input.primary_state != PrimaryState::Penalized;
+
+        // wenn der replacement keeper nicht mehr available (nicht mehr auf dem Spielfeld) ist, mache reset
+        if let Some(winner) = self.known_replacement_goalkeeper { // Learners Comment: Wenn k_r_g existiert, weise zu auf winner und führe Block aus
+            let winner_is_available =
+                winner != PlayerNumber::One
+                    && input.available_field_players[winner]
+                    && (winner != own_number || own_is_available);
+
+            if !winner_is_available {
+                self.reset();
+            }
+        }
+
+        if !own_is_available {
+            self.clear_election();
             return;
         }
 
+        // Keep current known_replacement_goalkeeper, when existent
+        if let Some(winner) = self.known_replacement_goalkeeper {
+            self.remember_winner(winner, own_number);
+            return;
+        }
+
+        match input.primary_state {
+            PrimaryState::Ready => {
+                self.clear_election();
+
+                let winner = input
+                    .available_field_players
+                    .iter()
+                    .filter_map(|(number, available)| {
+                        (number != PlayerNumber::One && *available)
+                            .then_some(number)
+                    })
+                    .min();
+
+                if let Some(winner) = winner {
+                    self.remember_winner(winner, own_number);
+                }
+            }
+
+            PrimaryState::Playing => {
+                // Dieser Timer läuft auch ohne eigene Kandidatur.
+                let needed_since = *self
+                    .replacement_needed_since
+                    .get_or_insert(input.now);
+
+                if self.state == ReplacementGoalkeeperState::Candidate
+                    && !input.is_eligible_candidate
+                {
+                    self.state = ReplacementGoalkeeperState::Inactive;
+                }
+
+                let other_claim = input.lowest_other_claiming_player;
+
+                // Kleinere verfügbare Nummern beginnen den Fallback früher.
+                let backoff_rank = input
+                    .available_field_players
+                    .iter()
+                    .filter(|(number, available)| {
+                        **available
+                            && *number != PlayerNumber::One
+                            && *number < own_number
+                    })
+                    .count() as u32;
+
+                let fallback_delay =
+                    parameters.no_claim_timeout
+                        + parameters.backoff_step * backoff_rank;
+
+                let fallback_due =
+                    input.now.duration_since(needed_since)
+                        >= fallback_delay;
+
+                let should_start_claim =
+                    input.is_eligible_candidate
+                        && (input.should_claim_first
+                            || (other_claim.is_none() && fallback_due));
+
+                if self.state == ReplacementGoalkeeperState::Inactive
+                    && should_start_claim
+                {
+                    self.state = ReplacementGoalkeeperState::Candidate;
+                }
+
+                // Eigenen Claim ohne Netzwerk-Echo einbeziehen.
+                let own_claim =
+                    (self.state == ReplacementGoalkeeperState::Candidate)
+                        .then_some(own_number);
+
+                let lowest_claim = other_claim
+                    .into_iter()
+                    .chain(own_claim)
+                    .min();
+
+                let Some(winner) = lowest_claim else {
+                    // Kein Claim: Wahlfenster zurücksetzen.
+                    // Der Fallback-Timer läuft weiter.
+                    self.election_started_at = None;
+                    return;
+                };
+
+                // Auch Spieler ohne eigenen Claim beobachten die Wahl.
+                let election_start = *self
+                    .election_started_at
+                    .get_or_insert(input.now);
+
+                let window_elapsed =
+                    input.now.duration_since(election_start)
+                        >= parameters.election_window;
+
+                if window_elapsed {
+                    self.remember_winner(winner, own_number);
+                }
+            }
+
+            _ => {
+                // Insbesondere Set und Stop: keine neue Wahl.
+                // Gültige gespeicherte Rollen wurden oben behandelt.
+                self.clear_election();
+            }
+
+        /* 
         match self.state {
-            ReplacementGoalkeeperState::Inactive => {
-                if input.is_eligible_candidate {
+            ReplacementGoalkeeperState::Inactive => { // bewerbung nur für spielende, geeignete Spieler
+                if input.is_playing && input.is_eligible_candidate {
                     self.state = ReplacementGoalkeeperState::Candidate;
                     self.election_started_at = Some(input.now);
                 }
             }
             ReplacementGoalkeeperState::Candidate => {
-                if !input.is_eligible_candidate {
+                if !input.is_playing || !input.is_eligible_candidate {
                     self.reset();
-                } else {
-            // Candidate -> Active
-                    match (input.election_window_elapsed, input.lowest_claiming_player, input.own_player_number) {
-                        (false, _, _) => {}
-                        (true, None, _) => {self.state = ReplacementGoalkeeperState::Active;}
-                        (true, Some(player_number), own_player_number) => {
-                            if own_player_number as i8 <= player_number as i8 {
-                                self.state = ReplacementGoalkeeperState::Active;
-                            }
-                        }
-                    }  
+                    return;
+                }
+
+                if !input.election_window_elapsed {
+                    return;
+                }
+
+                let lower_claim_exists = input
+                    .lowest_claiming_player
+                    .is_some_and(|number| number < input.own_player_number);
+                
+                if !lower_claim_exists {
+                    self.state = ReplacementGoalkeeperState::Active;
+                    self.election_started_at = None;
                 }
             }
             ReplacementGoalkeeperState::Active => {}
         }
+        */
 
         // Is there already an active claim?
 
         // Fallback?
     }
+}
 
     pub fn is_active(&self) -> bool {
         matches!(self.state, ReplacementGoalkeeperState::Active)
@@ -95,7 +275,9 @@ impl Default for ReplacementGoalkeeperCoordinator {
     fn default() -> Self {
         Self {
             state: ReplacementGoalkeeperState::Inactive,
+            known_replacement_goalkeeper: None,
             election_started_at: None,
+            replacement_needed_since: None,
         }
     }
 }
@@ -104,176 +286,158 @@ impl Default for ReplacementGoalkeeperCoordinator {
 mod tests {
     use super::*;
 
-    #[test]
-    fn resets_when_regular_goalkeeper_is_not_penalized() {
-        let mut coordinator = ReplacementGoalkeeperCoordinator {
-            state: ReplacementGoalkeeperState::Active,
-            election_started_at: None,
-        };
+    fn parameters() -> ReplacementGoalkeeperParameters {
+        ReplacementGoalkeeperParameters {
+            election_window: Duration::from_millis(500),
+            no_claim_timeout: Duration::from_secs(2),
+            backoff_step: Duration::from_millis(200),
+        }
+    }
 
-        coordinator.update(ReplacementGoalkeeperInput {
-            regular_goalkeeper_is_penalized: false,
-            is_playing: true,
-            is_eligible_candidate: true,
+    fn playing_input(now: Time) -> ReplacementGoalkeeperInput {
+        ReplacementGoalkeeperInput {
+            regular_goalkeeper_is_penalized: true,
+            primary_state: PrimaryState::Playing,
             own_player_number: PlayerNumber::Three,
-            lowest_claiming_player: None,
-            election_window_elapsed: true,
-            now: Time::zero(),
-        });
 
-        assert!(!coordinator.is_active());
-        assert!(!coordinator.claims_role());
+            available_field_players: Players {
+                one: false,
+                two: true,
+                three: true,
+                four: true,
+                five: false,
+            },
+
+            is_eligible_candidate: true,
+            should_claim_first: true,
+            lowest_other_claiming_player: None,
+            now,
+        }
     }
 
     #[test]
-    fn resets_when_robot_is_not_playing() {
-        let mut coordinator = ReplacementGoalkeeperCoordinator {
-            state: ReplacementGoalkeeperState::Active,
-            election_started_at: None,
-        };
+    fn becomes_active_only_after_election_window() {
+        let mut coordinator = ReplacementGoalkeeperCoordinator::default();
+        let parameters = parameters();
 
-        coordinator.update(ReplacementGoalkeeperInput {
-            regular_goalkeeper_is_penalized: true,
-            is_playing: false,
-            is_eligible_candidate: true,
-            own_player_number: PlayerNumber::Three,
-            lowest_claiming_player: None,
-            election_window_elapsed: true,
-            now: Time::zero(),
-        });
+        // Bei Wahlbeginn: Candidate, noch kein Gewinner.
+        coordinator.update(playing_input(Time::zero()), &parameters);
+
+        assert!(coordinator.claims_role());
+        assert!(!coordinator.is_active());
+        assert_eq!(coordinator.known_replacement_goalkeeper, None);
+
+        // Nach 499 ms: Das Fenster läuft noch.
+        coordinator.update(
+            playing_input(Time::from_nanos(499_000_000)),
+            &parameters,
+        );
 
         assert!(!coordinator.is_active());
-        assert!(!coordinator.claims_role());
-    }
+        assert_eq!(coordinator.known_replacement_goalkeeper, None);
 
-    #[test]
-    fn keeps_state_when_goalkeeper_is_penalized_and_robot_is_playing() {
-        let mut coordinator = ReplacementGoalkeeperCoordinator {
-            state: ReplacementGoalkeeperState::Active,
-            election_started_at: None,
-        };
-
-        coordinator.update(ReplacementGoalkeeperInput {
-            regular_goalkeeper_is_penalized: true,
-            is_playing: true,
-            is_eligible_candidate: true,
-            own_player_number: PlayerNumber::Three,
-            lowest_claiming_player: None,
-            election_window_elapsed: false,
-            now: Time::zero(),
-        });
+        // Nach genau 500 ms: Eigener Claim gewinnt ohne Netzwerk-Echo.
+        coordinator.update(
+            playing_input(Time::from_nanos(500_000_000)),
+            &parameters,
+        );
 
         assert!(coordinator.is_active());
         assert!(coordinator.claims_role());
+        assert_eq!(
+            coordinator.known_replacement_goalkeeper,
+            Some(PlayerNumber::Three),
+        );
     }
 
     #[test]
-    fn becomes_candidate_when_eligible() {
+    fn remembers_lower_claim_and_ends_own_candidacy() {
         let mut coordinator = ReplacementGoalkeeperCoordinator::default();
+        let parameters = parameters();
 
-        coordinator.update(ReplacementGoalkeeperInput {
-            regular_goalkeeper_is_penalized: true,
-            is_playing: true,
-            is_eligible_candidate: true,
-            own_player_number: PlayerNumber::Three,
-            lowest_claiming_player: None,
-            election_window_elapsed: true,
-            now: Time::zero(),
-        });
+        // Eigener Spieler 3 und fremder Spieler 2 claimen.
+        let mut input = playing_input(Time::zero());
+        input.lowest_other_claiming_player = Some(PlayerNumber::Two);
+        coordinator.update(input, &parameters);
 
-        assert!(!coordinator.is_active());
         assert!(coordinator.claims_role());
+        assert!(!coordinator.is_active());
+
+        // Am Wahlende gewinnt Spieler 2.
+        let mut input = playing_input(Time::from_nanos(500_000_000));
+        input.lowest_other_claiming_player = Some(PlayerNumber::Two);
+        coordinator.update(input, &parameters);
+
+        assert!(!coordinator.is_active());
+        assert!(!coordinator.claims_role());
+        assert_eq!(
+            coordinator.known_replacement_goalkeeper,
+            Some(PlayerNumber::Two),
+        );
+
+        // Ohne frischen Claim bleibt das gespeicherte Ergebnis erhalten.
+        coordinator.update(
+            playing_input(Time::from_nanos(600_000_000)),
+            &parameters,
+        );
+
+        assert!(!coordinator.claims_role());
+        assert_eq!(
+            coordinator.known_replacement_goalkeeper,
+            Some(PlayerNumber::Two),
+        );
     }
 
     #[test]
-    fn stays_inactive_when_not_eligible() {
+    fn clears_replacement_when_regular_goalkeeper_returns() {
         let mut coordinator = ReplacementGoalkeeperCoordinator::default();
+        let parameters = parameters();
 
-        coordinator.update(ReplacementGoalkeeperInput {
-            regular_goalkeeper_is_penalized: true,
-            is_playing: true,
-            is_eligible_candidate: false,
-            own_player_number: PlayerNumber::Three,
-            lowest_claiming_player: None,
-            election_window_elapsed: true,
-            now: Time::zero(),
-        });
+        // Zunächst wird Spieler 3 gewählt.
+        coordinator.update(playing_input(Time::zero()), &parameters);
+        coordinator.update(
+            playing_input(Time::from_nanos(500_000_000)),
+            &parameters,
+        );
 
-        assert!(!coordinator.is_active());
-        assert!(!coordinator.claims_role());
-    }
+        assert!(coordinator.is_active());
 
-    #[test]
-    fn candidate_withdraws_when_no_longer_eligible() {
-        let mut coordinator = ReplacementGoalkeeperCoordinator {
-            state: ReplacementGoalkeeperState::Candidate,
-            election_started_at: None,
-        };
-
-        coordinator.update(ReplacementGoalkeeperInput {
-            regular_goalkeeper_is_penalized: true,
-            is_playing: true,
-            is_eligible_candidate: false,
-            own_player_number: PlayerNumber::Three,
-            lowest_claiming_player: None,
-            election_window_elapsed: true,
-            now: Time::zero(),
-        });
+        // Anschließend ist Spieler 1 nicht mehr penalized.
+        let mut input = playing_input(Time::from_nanos(600_000_000));
+        input.regular_goalkeeper_is_penalized = false;
+        coordinator.update(input, &parameters);
 
         assert!(!coordinator.is_active());
         assert!(!coordinator.claims_role());
+        assert_eq!(coordinator.known_replacement_goalkeeper, None);
+        assert_eq!(coordinator.election_started_at, None);
+        assert_eq!(coordinator.replacement_needed_since, None);
     }
 
     #[test]
-    fn active_goalkeeper_stays_active_when_no_longer_eligible() {
-        let mut coordinator = ReplacementGoalkeeperCoordinator {
-            state: ReplacementGoalkeeperState::Active,
-            election_started_at: None,
-        };
+    fn later_lower_claim_does_not_replace_active_keeper() {
+        let mut coordinator = ReplacementGoalkeeperCoordinator::default();
+        let parameters = parameters();
 
-        coordinator.update(ReplacementGoalkeeperInput {
-            regular_goalkeeper_is_penalized: true,
-            is_playing: true,
-            is_eligible_candidate: false,
-            own_player_number: PlayerNumber::Three,
-            lowest_claiming_player: None,
-            election_window_elapsed: true,
-            now: Time::zero(),
-        });
+        // Spieler 3 gewinnt zunächst die Wahl.
+        coordinator.update(playing_input(Time::zero()), &parameters);
+        coordinator.update(
+            playing_input(Time::from_nanos(500_000_000)),
+            &parameters,
+        );
+
+        assert!(coordinator.is_active());
+
+        // Erst danach claimt Spieler 2.
+        let mut input = playing_input(Time::from_nanos(600_000_000));
+        input.lowest_other_claiming_player = Some(PlayerNumber::Two);
+        coordinator.update(input, &parameters);
 
         assert!(coordinator.is_active());
         assert!(coordinator.claims_role());
+        assert_eq!(
+            coordinator.known_replacement_goalkeeper,
+            Some(PlayerNumber::Three),
+        );
     }
-
-    #[test]
-    fn stores_election_start_time_wehen_becoming_candidate() {
-        let mut coordinator = ReplacementGoalkeeperCoordinator::default();
-        let now = Time::zero();
-
-        coordinator.update(ReplacementGoalkeeperInput {
-            regular_goalkeeper_is_penalized: true,
-            is_playing: true,
-            is_eligible_candidate: true,
-            own_player_number: PlayerNumber::Three,
-            lowest_claiming_player: None,
-            election_window_elapsed: true,
-            now: now,
-        });
-
-        assert!(coordinator.claims_role());
-        assert_eq!(coordinator.election_started_at, Some(now));
-    }
-
-    /*
-    #[test]
-    fn keeps_original_election_start_time_while_remaining_candidate() {
-        let mut coordinator = ReplacementGoalkeeperCoordinator::default();
-
-        let start_time = <ros_z::time::Time>::Duration::from_millis(5);
-        let later_time = <ros_z::time::Time>::Duration::from_millis(20);
-
-        coordinator.update(true, true, true, start_time);
-        coordinator.update(true, true, true, later_time);
-    }
-    */
 }
