@@ -92,7 +92,14 @@ pub fn is_close_to_ball_aligned(blackboard: &mut Blackboard) -> bool {
     is_close_and_aligned
 }
 
-pub fn is_closest_to_ball(blackboard: &mut Blackboard) -> bool {
+pub fn update_closest_to_ball(blackboard: &mut Blackboard) -> bool {
+    if blackboard.ball.is_none() || blackboard.voronoi_map.is_none() {
+        blackboard.last_closest_to_ball = false;
+        blackboard.closest_to_ball_entered_area_since = None;
+        blackboard.closest_to_ball_left_area_since = None;
+        return false;
+    }
+
     let own_player_number = blackboard.world_state.robot.player_number;
 
     let raw_is_closest =
@@ -135,6 +142,10 @@ pub fn is_closest_to_ball(blackboard: &mut Blackboard) -> bool {
 
     blackboard.last_closest_to_ball = is_closest;
     is_closest
+}
+
+pub fn is_closest_to_ball(blackboard: &mut Blackboard) -> bool {
+    blackboard.last_closest_to_ball
 }
 
 pub fn is_fallen(blackboard: &mut Blackboard) -> bool {

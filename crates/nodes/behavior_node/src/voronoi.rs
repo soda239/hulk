@@ -1,10 +1,17 @@
 use coordinate_systems::Field;
 use hsl_network_messages::PlayerNumber;
 use linear_algebra::{Pose2, point};
-use types::behavior_tree::Status;
+use types::{
+    behavior_tree::Status,
+    primary_state::PrimaryState
+};
 use voronoi::{VoronoiBounds, VoronoiGrid};
 
-use crate::node::Blackboard;
+use crate::{
+    conditions::update_closest_to_ball,
+    node::Blackboard
+};
+
 
 pub fn calculate_voronoi_grid(blackboard: &mut Blackboard) -> Status {
     if let Some(ground_to_field) = blackboard.world_state.robot.ground_to_field {
@@ -12,23 +19,23 @@ pub fn calculate_voronoi_grid(blackboard: &mut Blackboard) -> Status {
         let voronoi_parameters = &blackboard.parameters.voronoi;
         let obstacles = &blackboard.world_state.obstacles;
         let rule_obstacles = &blackboard.world_state.rule_obstacles;
-
+        
         let sites = collect_sites(blackboard, ground_to_field.as_pose());
         for (pose, _) in &sites {
             blackboard.voronoi_inputs.push(*pose);
         }
-
+        
         let length_half = field_dimensions.length / 2.0;
         let width_half = field_dimensions.width / 2.0;
         let border_strip_width = field_dimensions.border_strip_width;
-
+        
         let centroid_x_max = if let Some(ball) = &blackboard.ball {
             (ball.position.x() + voronoi_parameters.centroid_offset)
-                .max(-length_half + voronoi_parameters.minimum_centroid_margin_from_own_side)
+            .max(-length_half + voronoi_parameters.minimum_centroid_margin_from_own_side)
         } else {
             length_half
         };
-
+        
         let bounds = VoronoiBounds {
             grid_min: point!(
                 -length_half - border_strip_width,
@@ -41,7 +48,7 @@ pub fn calculate_voronoi_grid(blackboard: &mut Blackboard) -> Status {
             centroid_min: point!(-length_half, -width_half),
             centroid_max: point!(centroid_x_max, width_half),
         };
-
+        
         let mut map = VoronoiGrid::new(bounds, voronoi_parameters.clone());
         map.initialize_obstacles(obstacles, rule_obstacles, ground_to_field);
         map.multi_source_dijkstra(&sites, voronoi_parameters.orientation_bias);
@@ -58,14 +65,28 @@ fn collect_sites(
 ) -> Vec<(Pose2<Field>, PlayerNumber)> {
     let robot_player_number = blackboard.world_state.robot.player_number;
     let mut sites = vec![(robot_pose, robot_player_number)];
-
+    
     for (player_number, player_state) in blackboard.world_state.player_states.iter() {
         if let Some(player_state) = player_state
-            && player_number != robot_player_number
+        && player_number != robot_player_number
         {
             sites.push((player_state.pose, player_number));
         }
     }
-
+    
     sites
+}
+
+pub fn prepare_ball_responsibility(blackboard: &mut Blackboard) {
+    if blackboard.world_state.robot.primary_state != PrimaryState::Playing {
+        return;
+    }
+
+    let status = calculate_voronoi_grid(blackboard);
+
+    if !matches!(status, Status::Success) {
+        blackboard.voronoi_map = None;
+    }
+
+    update_closest_to_ball(blackboard);
 }

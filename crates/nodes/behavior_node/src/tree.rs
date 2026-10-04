@@ -21,7 +21,6 @@ use crate::{
     substates::{is_in_sub_state, sub_state_subtree},
     subtree,
     switch_motion_type::switch_motion_type,
-    voronoi::calculate_voronoi_grid,
     walk::{
         walk_alternatives_subtree, walk_to_ball_subtree, walk_to_kickoff_pose,
         walk_to_voronoi_position,
@@ -107,7 +106,6 @@ fn playing_subtree() -> Node<Blackboard> {
             subtree!(search_subtree)
         ),
         sequence!(
-            action!(calculate_voronoi_grid),
             condition!(is_closest_to_ball),
             subtree!(striker_subtree),
         ),

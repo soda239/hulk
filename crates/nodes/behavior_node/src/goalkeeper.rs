@@ -21,7 +21,6 @@ use crate::{
     subtree,
     switch_motion_type::switch_motion_type,
     tree::striker_subtree,
-    voronoi::calculate_voronoi_grid,
     walk::{walk_alternatives_subtree, walk_to, walk_to_block_position},
 };
 
@@ -60,7 +59,6 @@ pub fn goalkeeper_subtree() -> Node<Blackboard> {
             sequence!(
                 condition!(is_ball_close_enough_to_goal_to_become_striker),
                 selection!(sequence!(
-                    action!(calculate_voronoi_grid),
                     condition!(is_closest_to_ball),
                     subtree!(striker_subtree),
                 ),),
@@ -103,7 +101,6 @@ fn goalkeeper_sub_state_subtree() -> Node<Blackboard> {
         sequence!(
             condition!(hulks_is_kicking_team),
             condition!(is_sub_state, SubState::GoalKick),
-            action!(calculate_voronoi_grid),
             condition!(is_closest_to_ball),
             subtree!(striker_subtree),
         ),
