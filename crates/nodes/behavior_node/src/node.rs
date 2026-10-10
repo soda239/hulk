@@ -383,7 +383,10 @@ pub async fn run(ctx: Arc<Context>) -> Result<()> {
             blackboard.ball = None;
         }
 
-        let (status, trace) = block_in_place(|| tree.tick_with_trace(&mut blackboard));
+        let (status, trace) = block_in_place(|| {
+            crate::voronoi::prepare_voronoi(&mut blackboard);
+            tree.tick_with_trace(&mut blackboard)
+        });
         let motion_command: MotionCommand = assemble_motion_command(&blackboard, status)?;
 
         let previous_motion_command = blackboard.last_motion_command.clone();

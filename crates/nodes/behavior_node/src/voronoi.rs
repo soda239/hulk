@@ -7,13 +7,13 @@ use types::{
 };
 use voronoi::{VoronoiBounds, VoronoiGrid};
 
-use crate::{
-    conditions::update_closest_to_ball,
-    node::Blackboard
-};
+use crate::node::Blackboard;
 
 
 pub fn calculate_voronoi_grid(blackboard: &mut Blackboard) -> Status {
+    if blackboard.voronoi_map.is_some() {
+        return Status::Success;
+    }
     if let Some(ground_to_field) = blackboard.world_state.robot.ground_to_field {
         let field_dimensions = &blackboard.field_dimensions;
         let voronoi_parameters = &blackboard.parameters.voronoi;
@@ -77,7 +77,7 @@ fn collect_sites(
     sites
 }
 
-pub fn prepare_ball_responsibility(blackboard: &mut Blackboard) {
+pub fn prepare_voronoi(blackboard: &mut Blackboard) {
     if blackboard.world_state.robot.primary_state != PrimaryState::Playing {
         return;
     }
@@ -87,6 +87,4 @@ pub fn prepare_ball_responsibility(blackboard: &mut Blackboard) {
     if !matches!(status, Status::Success) {
         blackboard.voronoi_map = None;
     }
-
-    update_closest_to_ball(blackboard);
 }

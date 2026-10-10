@@ -15,7 +15,7 @@ pub struct ReplacementGoalkeeperInput {
     pub primary_state: PrimaryState,
     pub own_player_number: PlayerNumber,
 
-    pub available_field_players: Players<bool>, // Players on field. Info gathered via StateMessages?
+    pub available_field_players: Players<bool>, // Players on field, abgleitet aus gültigen empfangenen PlayerStates
     pub is_eligible_candidate: bool, // Ich bin verfügbar, meine Pose ist bekannt, ich bin nicht ballzuständig
     pub should_claim_first: bool, // unter allen verfügbaren Robotern mit gültiger Pose bin ich der Tornächste. Deren Ballzuständigkeit kenne ich nicht.
 

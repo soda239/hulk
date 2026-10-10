@@ -83,7 +83,7 @@ impl SimulatorRobotBehavior {
             self.blackboard.ball = None;
         }
 
-        behavior_node::voronoi::prepare_ball_responsibility(&mut self.blackboard);
+        behavior_node::voronoi::prepare_voronoi(&mut self.blackboard);
 
         let (status, trace) = self.tree.tick_with_trace(&mut self.blackboard);
         let motion_command = assemble_motion_command(&self.blackboard, status)?;
