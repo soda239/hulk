@@ -1,35 +1,16 @@
 use types::{motion_type::MotionType, primary_state::PrimaryState};
 
 use crate::{
-    action,
-    actions::{damping, injected_motion_command, prepare, remote_control, stand, stand_up},
-    behavior_tree::Node,
-    condition,
-    conditions::{
-        has_ball_position, is_ball_interception_candidate, is_close_to_ball, is_closest_to_ball,
-        is_fallen, is_goalkeeper, is_last_hulk_standing, is_primary_state, is_remote_controlled,
-        is_remote_kick_mode, is_simple,
-    },
-    goalkeeper::goalkeeper_subtree,
-    head::{look_around, look_at_ball_subtree, look_straight_ahead, search_for_lost_ball_subtree},
-    kick::{intercept, kick, kick_power_subtree, kick_subtree, set_kick_target_in_front},
-    negation,
-    node::Blackboard,
-    penalty_shootout::{is_penalty_shootout, penalty_shootout_subtree},
-    search::leuchtturm,
-    selection, sequence,
-    substates::{is_in_sub_state, sub_state_subtree},
-    subtree,
-    switch_motion_type::switch_motion_type,
-    voronoi::calculate_voronoi_grid,
-    walk::{
+    action, actions::{damping, injected_motion_command, prepare, remote_control, stand, stand_up}, behavior_tree::Node, condition, conditions::{
+        has_ball_position, is_active_replacement_goalkeeper, is_ball_interception_candidate, is_close_to_ball, is_closest_to_ball, is_fallen, is_goalkeeper, is_last_hulk_standing, is_primary_state, is_remote_controlled, is_remote_kick_mode, is_simple,
+    }, goalkeeper::goalkeeper_subtree, head::{look_around, look_at_ball_subtree, look_straight_ahead, search_for_lost_ball_subtree}, kick::{intercept, kick, kick_power_subtree, kick_subtree, set_kick_target_in_front}, negation, node::Blackboard, penalty_shootout::{is_penalty_shootout, penalty_shootout_subtree}, replacement_goalkeeper::refresh_replacement_goalkeeper_role, search::leuchtturm, selection, sequence, substates::{is_in_sub_state, sub_state_subtree}, subtree, switch_motion_type::switch_motion_type, voronoi::calculate_voronoi_grid, walk::{
         walk_alternatives_subtree, walk_to_ball_subtree, walk_to_kickoff_pose,
         walk_to_voronoi_position,
     },
 };
 
 pub fn create_tree() -> Node<Blackboard> {
-    selection!(
+    let behavior = selection!(
         sequence!(
             condition!(is_primary_state, PrimaryState::Damping),
             action!(damping)
@@ -54,7 +35,7 @@ pub fn create_tree() -> Node<Blackboard> {
         ),
         sequence!(
             selection!(
-                condition!(is_primary_state, PrimaryState::Finished),
+                condition!(is_primary_state, PrimaryState::Finished), // Why Finished again?!
                 condition!(is_primary_state, PrimaryState::Penalized),
             ),
             action!(stand)
@@ -78,6 +59,11 @@ pub fn create_tree() -> Node<Blackboard> {
             subtree!(playing_subtree)
         ),
         Node::Failure
+    );
+
+    sequence!(
+        action!(refresh_replacement_goalkeeper_role), // to refresh coordinator every loop
+        behavior,
     )
 }
 
@@ -102,8 +88,10 @@ fn playing_subtree() -> Node<Blackboard> {
             )
         ),
         sequence!(condition!(is_goalkeeper), subtree!(goalkeeper_subtree)),
+        sequence!(condition!(is_active_replacement_goalkeeper), subtree!(goalkeeper_subtree)),
         sequence!(
             negation!(condition!(has_ball_position)),
+            // know that no ball position available -> not excluded replacement keeper -> call replacement_keeper_decision_tree
             subtree!(search_subtree)
         ),
         sequence!(
@@ -111,6 +99,7 @@ fn playing_subtree() -> Node<Blackboard> {
             condition!(is_closest_to_ball),
             subtree!(striker_subtree),
         ),
+        // know that player is not closest to ball -> not excluded replacement keeper -> call replacement_keeper_decision_tree
         subtree!(supporter_subtree),
     )
 }

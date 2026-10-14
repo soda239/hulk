@@ -164,6 +164,7 @@ fn create_behavior_blackboard(parameters: BehaviorParameters) -> BehaviorBlackbo
         field_dimensions: FieldDimensions::default(),
         parameters,
         world_state: WorldState::default(),
+        replacement_goalkeeper_coordinator: Default::default(),
         path_obstacles_output: Vec::new(),
         time_since_last_switch: Duration::ZERO,
         direction_difference: 0.0,

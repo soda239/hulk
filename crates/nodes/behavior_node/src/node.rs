@@ -29,7 +29,11 @@ use types::{
 };
 use voronoi::VoronoiGrid;
 
-use crate::{motion_assembler::assemble_motion_command, tree::create_tree};
+use crate::{
+    motion_assembler::assemble_motion_command,
+    replacement_goalkeeper::ReplacementGoalkeeperCoordinator,
+    tree::create_tree,
+};
 
 #[derive(Debug, Clone, Serialize, Deserialize, Message)]
 pub struct LastBall {
@@ -44,6 +48,7 @@ pub struct Blackboard {
     pub field_dimensions: FieldDimensions,
     pub parameters: BehaviorParameters,
     pub world_state: WorldState,
+    pub replacement_goalkeeper_coordinator: ReplacementGoalkeeperCoordinator,
 
     pub path_obstacles_output: Vec<PathObstacle>,
     pub time_since_last_switch: Duration,
@@ -261,6 +266,7 @@ pub async fn run(ctx: Arc<Context>) -> Result<()> {
             .unwrap_or_default(),
         parameters: parameters.snapshot().typed().clone(),
         world_state: WorldState::default(),
+        replacement_goalkeeper_coordinator: Default::default(),
 
         path_obstacles_output: Vec::new(),
         time_since_last_switch: Duration::ZERO,

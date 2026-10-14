@@ -1,14 +1,29 @@
 // coordinator for decentralized replacement goalkeeper election
 
+use linear_algebra::{Isometry2, Pose2};
+use types::world_state::PlayerState; // Nur für die Tests notwendig, trotzdem hier einpflegen?
+
 use hsl_network_messages::{Player, PlayerNumber};
+use linear_algebra::point;
 use ros_z::time::Time;
 use std::time::Duration;
-
+use serde::{Deserialize, Serialize}; // was macht das?
 use types::{
+    behavior_tree::Status,
     players::Players,
     primary_state::PrimaryState,
     world_state::{self, WorldState},
 };
+
+use crate::node::Blackboard;
+
+#[derive(Debug, Clone, Copy)]
+pub struct ReplacementGoalkeeperRoleInput {
+    pub regular_goalkeeper_is_penalized: bool,
+    pub primary_state: PrimaryState,
+    pub own_player_number: PlayerNumber,
+    pub available_field_players: Players<bool>,
+}
 
 pub struct ReplacementGoalkeeperInput {
     pub regular_goalkeeper_is_penalized: bool,
@@ -29,6 +44,88 @@ pub struct ReplacementGoalkeeperParameters {
     pub election_window: Duration,
     pub no_claim_timeout: Duration,
     pub backoff_step: Duration,
+}
+
+// ToDo: Fehlender-GameController Zustand ergibt hier false, wodurch eine bestehende Rolle zurückgesetzt wird. In Zukunft ändern!
+pub fn refresh_replacement_goalkeeper_role(
+    blackboard: &mut Blackboard,
+) -> Status {
+    let world_state = &blackboard.world_state;
+
+    let input = ReplacementGoalkeeperRoleInput {
+        regular_goalkeeper_is_penalized: world_state
+            .filtered_game_controller_state
+            .as_ref()
+            .is_some_and(|state| {
+                state.penalties[PlayerNumber::One].is_some() // TODO Parametrisieren der PlayerNumber::One
+            }),
+        primary_state: world_state.robot.primary_state,
+        own_player_number: world_state.robot.player_number,
+        available_field_players:
+            calculate_available_field_players(world_state),
+    };
+
+    blackboard
+        .replacement_goalkeeper_coordinator
+        .refresh_role_status(input);
+
+    Status::Success
+}
+
+/// todo sollte umbenannt werden is is_closest_to_goal oder so was in der art
+/// Returns whether this robot should claim first based on goal distance.
+/// Equal distances are resolved in favor of the lower player number.
+pub(crate) fn should_claim_first(
+    blackboard: &Blackboard,
+    available_field_players: &Players<bool>,
+) -> bool {
+    let world_state = &blackboard.world_state;
+    let own_number = world_state.robot.player_number;
+
+    if own_number == PlayerNumber::One
+        || !available_field_players[own_number]
+    {
+        return false;
+    }
+
+    let Some(ground_to_field) =
+        world_state.robot.ground_to_field
+    else {
+        return false;
+    };
+
+    let own_goal = point!(
+        -blackboard.field_dimensions.length / 2.0,
+        0.0
+    );
+
+    let own_distance_squared =
+        (ground_to_field.translation() - own_goal).norm_squared();
+
+    for (number, player_state) in world_state.player_states.iter() {
+        if number == PlayerNumber::One
+            || number == own_number
+            || !available_field_players[number]
+        {
+            continue;
+        }
+
+        let Some(player_state) = player_state else {
+            continue;
+        };
+
+        let other_distance_squared =
+            (player_state.pose.position() - own_goal).norm_squared();
+
+        if other_distance_squared < own_distance_squared
+            || (other_distance_squared == own_distance_squared
+                && number < own_number)
+        {
+            return false;
+        }
+    }
+
+    true
 }
 
 pub(crate) fn calculate_available_field_players(world_state: &WorldState) -> Players<bool> {
@@ -139,7 +236,10 @@ pub(crate) fn calculate_available_field_players_ole(world_state: &WorldState) ->
     */
 }
 
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+#[derive(
+    Debug, Default, Clone, Copy, PartialEq, Eq,
+    Serialize, Deserialize, ros_z::Message,
+)]
 enum ReplacementGoalkeeperState {
     #[default]
     Inactive,
@@ -147,12 +247,15 @@ enum ReplacementGoalkeeperState {
     Active,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct ReplacementGoalkeeperCoordinator {
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq,
+    Serialize, Deserialize, ros_z::Message,
+)]
+pub struct ReplacementGoalkeeperCoordinator {
     state: ReplacementGoalkeeperState,
     known_replacement_goalkeeper: Option<PlayerNumber>,
     election_started_at: Option<Time>,
-    replacement_needed_since: Option<Time>, // Time since when replacement keeper needed in playing
+    replacement_needed_since: Option<Time>,
 }
 
 impl ReplacementGoalkeeperCoordinator {
@@ -176,36 +279,40 @@ impl ReplacementGoalkeeperCoordinator {
         }
     }
 
-    // fn is_eligible_candidate an dieser Stelle einfügen?
-    // Zeitmessung und election window handling an dieser einfügen?
-
-    pub fn update(
+    /// Validates the remembered replacement goalkeeper and clears invalid roles
+    /// or candidacies. Returns whether keeper selection may proceed.
+    /// Does not start or advance an election.
+    pub fn refresh_role_status(
         &mut self,
-        input: ReplacementGoalkeeperInput,
-        parameters: &ReplacementGoalkeeperParameters,
-    ) {
+        input: ReplacementGoalkeeperRoleInput,
+    ) -> bool {
         let own_number = input.own_player_number;
+
+        // Warum brauche ich hier den Filter?
         let available_count = input
             .available_field_players
             .iter()
-            .filter(|(number, available)| *number != PlayerNumber::One && **available)
+            .filter(|(number, available)| {
+                *number != PlayerNumber::One && **available
+            })
             .count();
-
+        
         if !input.regular_goalkeeper_is_penalized || available_count <= 1 {
             self.reset();
-            return;
+            return false;
         }
 
-        let own_is_available = own_number != PlayerNumber::One
-            && input.available_field_players[own_number]
-            && input.primary_state != PrimaryState::Penalized;
+        // Notwendig so elaboriert? 
+        let own_is_available =
+            own_number != PlayerNumber::One // TODO parameterize
+                && input.available_field_players[own_number]
+                && input.primary_state != PrimaryState::Penalized;
 
-        // wenn der replacement keeper nicht mehr available (nicht mehr auf dem Spielfeld) ist, mache reset
         if let Some(winner) = self.known_replacement_goalkeeper {
-            // Learners Comment: Wenn k_r_g existiert, weise zu auf winner und führe Block aus
-            let winner_is_available = winner != PlayerNumber::One
-                && input.available_field_players[winner]
-                && (winner != own_number || own_is_available);
+            let winner_is_available =
+                winner != PlayerNumber::One
+                    && input.available_field_players[winner]
+                    && (winner != own_number || own_is_available);
 
             if !winner_is_available {
                 self.reset();
@@ -214,14 +321,48 @@ impl ReplacementGoalkeeperCoordinator {
 
         if !own_is_available {
             self.clear_election();
+            return false;
+        }
+
+        // Eine gültige Besetzung bleibt bestehen, aber muss man das so machen?
+        if let Some(winner) = self.known_replacement_goalkeeper {
+            self.remember_winner(winner, own_number);
+            return false;
+        }
+
+        if input.primary_state != PrimaryState::Playing {
+            self.clear_election();
+        }
+
+        matches!(
+            input.primary_state,
+            PrimaryState::Ready | PrimaryState::Playing
+        )
+        // true: Auswahl darf weiter geprüft werden.
+        // false: In diesem Update keine Auswahl fortsetzen.
+    }
+
+    // fn is_eligible_candidate an dieser Stelle einfügen?
+    // Zeitmessung und election window handling an dieser einfügen?
+
+    pub fn update(
+        &mut self,
+        input: ReplacementGoalkeeperInput,
+        parameters: &ReplacementGoalkeeperParameters,
+    ) {
+        let role_input = ReplacementGoalkeeperRoleInput {
+            regular_goalkeeper_is_penalized:
+                input.regular_goalkeeper_is_penalized,
+            primary_state: input.primary_state,
+            own_player_number: input.own_player_number,
+            available_field_players: input.available_field_players,
+        };
+
+        if !self.refresh_role_status(role_input) {
             return;
         }
 
-        // Keep current known_replacement_goalkeeper, when existent
-        if let Some(winner) = self.known_replacement_goalkeeper {
-            self.remember_winner(winner, own_number);
-            return;
-        }
+        let own_number = input.own_player_number;
 
         match input.primary_state {
             PrimaryState::Ready => {
@@ -368,6 +509,53 @@ impl Default for ReplacementGoalkeeperCoordinator {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn goal_distance_blackboard() -> Blackboard {
+    let mut blackboard = Blackboard {
+        field_dimensions: Default::default(),
+        parameters: Default::default(),
+        world_state: WorldState::default(),
+        replacement_goalkeeper_coordinator: Default::default(),
+
+        path_obstacles_output: Vec::new(),
+        time_since_last_switch: Duration::ZERO,
+        direction_difference: 0.0,
+        voronoi_inputs: Vec::new(),
+
+        ball: None,
+        visual_kick_ball_position: None,
+        last_ball: None,
+        last_close_enough_to_kick: false,
+        last_kick_target: None,
+        last_motion_command: Default::default(),
+        last_motion_switch_time: Time::zero(),
+        last_motion_type: None,
+        last_sent_game_controller_return_message_time: None,
+        last_sent_hsl_message_time: None,
+        last_closest_to_ball: false,
+        closest_to_ball_entered_area_since: None,
+        closest_to_ball_left_area_since: None,
+
+        is_injected_motion_command: false,
+        walk_position: None,
+        body_motion: None,
+        head_motion: None,
+        voronoi_map: None,
+    };
+
+    blackboard.field_dimensions.length = 10.0;
+    blackboard.world_state.robot.player_number = PlayerNumber::Three;
+    blackboard.world_state.robot.primary_state = PrimaryState::Playing;
+    blackboard.world_state.robot.ground_to_field =
+        Some(Isometry2::from(point!(-4.0, 0.0)));
+
+    blackboard.world_state.player_states.two = Some(PlayerState {
+        pose: Pose2::new(point!(-3.0, 0.0), 0.0),
+        ..Default::default()
+    });
+
+    blackboard
+}
 
     fn parameters() -> ReplacementGoalkeeperParameters {
         ReplacementGoalkeeperParameters {
@@ -534,4 +722,155 @@ mod tests {
         );
     }
 
+    #[test]
+    fn candidate_withdraws_in_stop() {
+        let mut coordinator = ReplacementGoalkeeperCoordinator::default();
+        let parameters = parameters();
+        let input = playing_input(Time::zero());
+
+        let stop_input = ReplacementGoalkeeperRoleInput {
+            regular_goalkeeper_is_penalized:
+                input.regular_goalkeeper_is_penalized,
+            primary_state: PrimaryState::Stop,
+            own_player_number: input.own_player_number,
+            available_field_players: input.available_field_players,
+        };
+
+        coordinator.update(input, &parameters);
+
+        assert_eq!(
+            coordinator.state,
+            ReplacementGoalkeeperState::Candidate,
+        );
+        assert!(coordinator.claims_role());
+        assert!(coordinator.election_started_at.is_some());
+        assert!(coordinator.replacement_needed_since.is_some());
+
+        let selection_allowed = coordinator.refresh_role_status(stop_input);
+
+        assert!(!selection_allowed);
+        assert_eq!(
+            coordinator.state,
+            ReplacementGoalkeeperState::Inactive,
+        );
+        assert!(!coordinator.claims_role());
+        assert_eq!(coordinator.known_replacement_goalkeeper, None);
+        assert_eq!(coordinator.election_started_at, None);
+        assert_eq!(coordinator.replacement_needed_since, None);
+    }
+
+    #[test]
+    fn active_replacement_stays_active_in_stop() {
+        let mut coordinator = ReplacementGoalkeeperCoordinator::default();
+        let parameters = parameters();
+        let input = playing_input(Time::zero());
+
+        let stop_input = ReplacementGoalkeeperRoleInput {
+            regular_goalkeeper_is_penalized:
+                input.regular_goalkeeper_is_penalized,
+            primary_state: PrimaryState::Stop,
+            own_player_number: input.own_player_number,
+            available_field_players: input.available_field_players,
+        };
+
+        // Wahl beginnen und nach 500 ms gewinnen.
+        coordinator.update(input, &parameters);
+        coordinator.update(
+            playing_input(Time::from_nanos(500_000_000)), // duration of election window elapsed
+            &parameters,
+        );
+
+        assert!(coordinator.is_active());
+        assert_eq!(
+            coordinator.known_replacement_goalkeeper,
+            Some(PlayerNumber::Three),
+        );
+
+        let selection_allowed = coordinator.refresh_role_status(stop_input);
+
+        assert!(!selection_allowed);
+        assert!(coordinator.is_active());
+        assert!(coordinator.claims_role());
+        assert_eq!(
+            coordinator.known_replacement_goalkeeper,
+            Some(PlayerNumber::Three),
+        );
+        assert_eq!(coordinator.election_started_at, None);
+        assert_eq!(coordinator.replacement_needed_since, None);
+    }
+
+    #[test]
+    fn should_claim_first_when_own_player_is_closest_to_goal() {
+        let blackboard = goal_distance_blackboard();
+        let available =
+            calculate_available_field_players(&blackboard.world_state);
+
+        // Eigene lokale Pose reicht; kein eigenes Netzwerk-Echo nötig.
+        assert!(blackboard.world_state.player_states.three.is_none());
+        assert!(should_claim_first(&blackboard, &available));
+    }
+
+    #[test]
+    fn should_claim_first_is_false_when_other_player_is_closer() {
+        let mut blackboard = goal_distance_blackboard();
+        blackboard.world_state.player_states.two.as_mut().unwrap().pose =
+            Pose2::new(point!(-4.5, 0.0), 0.0);
+
+        let available =
+            calculate_available_field_players(&blackboard.world_state);
+
+        assert!(!should_claim_first(&blackboard, &available));
+    }
+
+    #[test]
+    fn should_claim_first_ignores_unavailable_closer_player() {
+        let mut blackboard = goal_distance_blackboard();
+        blackboard.world_state.player_states.two.as_mut().unwrap().pose =
+            Pose2::new(point!(-4.5, 0.0), 0.0);
+
+        let mut available =
+            calculate_available_field_players(&blackboard.world_state);
+        available.two = false;
+
+        assert!(should_claim_first(&blackboard, &available));
+    }
+
+    #[test]
+    fn should_claim_first_breaks_ties_by_player_number() {
+        for (other_number, expected) in [
+            (PlayerNumber::Two, false),
+            (PlayerNumber::Four, true),
+        ] {
+            let mut blackboard = goal_distance_blackboard();
+            blackboard.world_state.player_states = Players::new(None);
+
+            // Gleiche Position bedeutet exakt gleiche Entfernung.
+            blackboard.world_state.player_states[other_number] =
+                Some(PlayerState {
+                    pose: Pose2::new(point!(-4.0, 0.0), 0.0),
+                    ..Default::default()
+                });
+
+            let available =
+                calculate_available_field_players(&blackboard.world_state);
+
+            assert_eq!(
+                should_claim_first(&blackboard, &available),
+                expected,
+                "tie with player {other_number:?}",
+            );
+        }
+    }
+
+    #[test]
+    fn should_claim_first_is_false_without_own_pose() {
+        let mut blackboard = goal_distance_blackboard();
+        blackboard.world_state.robot.ground_to_field = None;
+
+        let available =
+            calculate_available_field_players(&blackboard.world_state);
+
+        assert!(!should_claim_first(&blackboard, &available));
+    }
+    
 }

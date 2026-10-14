@@ -7,7 +7,10 @@ use types::{
 };
 use voronoi::{VoronoiBounds, VoronoiGrid};
 
-use crate::node::Blackboard;
+use crate::{
+    conditions::update_closest_to_ball,
+    node::Blackboard,
+};
 
 
 pub fn calculate_voronoi_grid(blackboard: &mut Blackboard) -> Status {
@@ -87,4 +90,6 @@ pub fn prepare_voronoi(blackboard: &mut Blackboard) {
     if !matches!(status, Status::Success) {
         blackboard.voronoi_map = None;
     }
+
+    update_closest_to_ball(blackboard);
 }
